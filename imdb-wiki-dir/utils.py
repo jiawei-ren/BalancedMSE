@@ -83,6 +83,8 @@ def adjust_learning_rate(optimizer, epoch, args):
     for milestone in args.schedule:
         lr *= 0.1 if epoch >= milestone else 1.
     for param_group in optimizer.param_groups:
+        if 'name' in param_group and param_group['name'] == 'noise_sigma':
+            continue
         param_group['lr'] = lr
 
 

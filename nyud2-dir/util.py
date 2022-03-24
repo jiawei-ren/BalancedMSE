@@ -38,7 +38,7 @@ class Evaluator:
             'many': [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
                      28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 47, 49],
             'medium': [7, 8, 46, 48, 50, 51, 52, 53, 54, 55, 56, 58, 60, 61, 63],
-            'few': [0, 1, 2, 3, 4, 5, 6, 57, 59, 62, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77,
+            'few': [57, 59, 62, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77,
                     78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99]
         }
         self.output = torch.tensor([], dtype=torch.float32)
@@ -49,6 +49,53 @@ class Evaluator:
         depth = depth.squeeze().view(-1).cpu()
         self.output = torch.cat([self.output, output])
         self.depth = torch.cat([self.depth, depth])
+
+    def evaluate_shot_balanced(self):
+        metric_dict = {'overall': {}, 'many': {}, 'medium': {}, 'few': {}}
+        self.depth_bucket = np.array(list(map(lambda v: self.get_bin_idx(v), self.depth.cpu().numpy())))
+
+        bin_cnt = []
+        for i in range(100):
+            cnt = np.count_nonzero(self.depth_bucket == i)
+            cnt = 1 if cnt >= 1 else 0
+            bin_cnt.append(cnt)
+
+        bin_metric = []
+        for i in range(100):
+            mask = np.zeros(self.depth.size(0), dtype=np.bool)
+            mask[np.where(self.depth_bucket == i)[0]] = True
+            mask = torch.tensor(mask, dtype=torch.bool)
+            bin_metric.append(self.evaluate(self.output[mask], self.depth[mask]))
+
+        for shot in metric_dict.keys():
+            if shot == 'overall':
+                for k in bin_metric[0].keys():
+                    metric_dict[shot][k] = 0.
+                    for i in range(7, 100):
+                        metric_dict[shot][k] += bin_metric[i][k]
+                    if k!= 'NUM':
+                        metric_dict[shot][k] /= sum(bin_cnt)
+            else:
+                for k in bin_metric[0].keys():
+                    metric_dict[shot][k] = 0.
+                    for i in self.shot_idx[shot]:
+                        metric_dict[shot][k] += bin_metric[i][k]
+                    if k != 'NUM':
+                        metric_dict[shot][k] /= sum([bin_cnt[i] for i in self.shot_idx[shot]])
+
+        logging.info('\n***** TEST RESULTS *****')
+        for shot in ['Overall', 'Many', 'Medium', 'Few']:
+            logging.info(f" * {shot}: RMSE {metric_dict[shot.lower()]['MSE'] ** 0.5:.3f}\t"
+                        f"MSE {metric_dict[shot.lower()]['MSE']:.3f}\t"
+                        f"ABS_REL {metric_dict[shot.lower()]['ABS_REL']:.3f}\t"
+                        f"LG10 {metric_dict[shot.lower()]['LG10']:.3f}\t"
+                        f"MAE {metric_dict[shot.lower()]['MAE']:.3f}\t"
+                        f"DELTA1 {metric_dict[shot.lower()]['DELTA1']:.3f}\t"
+                        f"DELTA2 {metric_dict[shot.lower()]['DELTA2']:.3f}\t"
+                        f"DELTA3 {metric_dict[shot.lower()]['DELTA3']:.3f}\t"
+                        f"NUM {metric_dict[shot.lower()]['NUM']}")
+
+        return metric_dict
 
     def evaluate_shot(self):
         metric_dict = {'overall': {}, 'many': {}, 'medium': {}, 'few': {}}

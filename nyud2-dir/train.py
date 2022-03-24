@@ -11,6 +11,7 @@ from models import modules, net, resnet
 from util import query_yes_no
 from test import test
 from tensorboardX import SummaryWriter
+from balanaced_mse import *
 
 parser = argparse.ArgumentParser(description='')
 
@@ -48,6 +49,15 @@ parser.add_argument('--bucket_num', type=int, default=100, help='maximum bucket 
 parser.add_argument('--bucket_start', type=int, default=7, help='minimum(starting) bucket for FDS, 7 for NYUDv2')
 parser.add_argument('--fds_mmt', type=float, default=0.9, help='FDS momentum')
 
+# BMSE
+parser.add_argument('--bmse', action='store_true', default=False, help='use Balanced MSE')
+parser.add_argument('--imp', type=str, default='gai', choices=['gai', 'bmc', 'bni'], help='implementation options')
+parser.add_argument('--gmm', type=str, default='gmm.pkl', help='path to preprocessed GMM')
+parser.add_argument('--init_noise_sigma', type=float, default=1., help='initial scale of the noise')
+parser.add_argument('--sigma_lr', type=float, default=1e-2, help='learning rate of the noise scale')
+parser.add_argument('--fix_noise_sigma', action='store_true', default=False, help='disable joint optimization')
+
+
 # re-weighting: SQRT_INV / INV
 parser.add_argument('--reweight', type=str, default='none', choices=['none', 'inverse', 'sqrt_inv'],
                     help='cost-sensitive reweighting scheme')
@@ -84,6 +94,10 @@ def main():
         args.store_name += f'_{args.start_update}_{args.start_smooth}_{args.fds_mmt}'
     if args.retrain_fc:
         args.store_name += f'_retrain_fc'
+    if args.bmse:
+        args.store_name += f'_{args.imp}_{args.init_noise_sigma}_{args.sigma_lr}'
+        if args.imp == 'gai':
+            args.store_name += f'_{args.gmm[:-4]}'
     args.store_name += f'_lr_{args.lr}_bs_{args.batch_size}'
 
     args.store_dir = os.path.join(args.store_root, args.store_name)
@@ -152,9 +166,22 @@ def main():
     train_fds_loader = loaddata.getTrainingFDSData(args, args.batch_size)
     test_loader = loaddata.getTestingData(args, 1)
 
+    if args.bmse:
+        if args.imp == 'gai':
+            criterion = GAILoss(args.init_noise_sigma, args.gmm)
+        elif args.imp == 'bmc':
+            criterion = BMCLoss(args.init_noise_sigma)
+        elif args.imp == 'bni':
+            bucket_centers, bucket_weights = loaddata.get_bucket_info(args)
+            criterion = BNILoss(args.init_noise_sigma, bucket_centers, bucket_weights)
+        if not args.fix_noise_sigma:
+            optimizer.add_param_group({'params': criterion.noise_sigma, 'lr': args.sigma_lr, 'name': 'noise_sigma'})
+    else:
+        criterion = None
+
     for epoch in range(args.start_epoch, args.epochs):
         adjust_learning_rate(optimizer, epoch)
-        train(train_loader, train_fds_loader, model, optimizer, epoch, writer)
+        train(train_loader, train_fds_loader, model, optimizer, epoch, writer, criterion)
         error, metric_dict = test(test_loader, model)
         if error < error_best:
             error_best = error
@@ -178,9 +205,11 @@ def main():
 
     writer.close()
 
-def train(train_loader, train_fds_loader, model, optimizer, epoch, writer):
+def train(train_loader, train_fds_loader, model, optimizer, epoch, writer, criterion):
     batch_time = AverageMeter()
     losses = AverageMeter()
+    noise_var = AverageMeter()
+    l2 = AverageMeter()
 
     model.train()
 
@@ -197,7 +226,17 @@ def train(train_loader, train_fds_loader, model, optimizer, epoch, writer):
             output, feature = model(image, depth, epoch)
         else:
             output = model(image, depth, epoch)
-        loss = torch.mean(((output - depth) ** 2) * weight)
+
+        if args.bmse:
+            output = output[depth >= 0.7]
+            depth = depth[depth >= 0.7]
+            output = output.reshape(-1, 1)
+            depth = depth.reshape(-1, 1)
+            loss = criterion(output, depth)
+            noise_var.update(criterion.noise_sigma.item() ** 2)
+            l2.update(F.mse_loss(output, depth).item())
+        else:
+            loss = torch.mean(((output - depth) ** 2) * weight)
 
         losses.update(loss.item(), image.size(0))
         loss.backward()
@@ -208,10 +247,18 @@ def train(train_loader, train_fds_loader, model, optimizer, epoch, writer):
 
         writer.add_scalar('data/loss', loss.item(), i + epoch * len(train_loader))
 
-        logging.info('Epoch: [{0}][{1}/{2}]\t'
-          'Time {batch_time.val:.3f} ({batch_time.sum:.3f})\t'
-          'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-          .format(epoch, i, len(train_loader), batch_time=batch_time, loss=losses))
+        if args.bmse:
+            logging.info('Epoch: [{0}][{1}/{2}]\t'
+              'Time {batch_time.val:.3f} ({batch_time.sum:.3f})\t'
+              'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+              'Noise Var {noise_var.val:.4f} ({noise_var.avg:.4f})\t'
+              'L2 {l2.val:.4f} ({l2.avg:.4f})\t'
+              .format(epoch, i, len(train_loader), batch_time=batch_time, loss=losses, noise_var=noise_var, l2=l2))
+        else:
+            logging.info('Epoch: [{0}][{1}/{2}]\t'
+              'Time {batch_time.val:.3f} ({batch_time.sum:.3f})\t'
+              'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+              .format(epoch, i, len(train_loader), batch_time=batch_time, loss=losses))
 
     if args.fds and epoch >= args.start_update:
         logging.info(f"Starting Creating Epoch [{epoch}] features of subsampled training data...")
@@ -227,10 +274,13 @@ def train(train_loader, train_fds_loader, model, optimizer, epoch, writer):
         model.module.R.FDS.update_last_epoch_stats(epoch)
         model.module.R.FDS.update_running_stats(encodings, depths, epoch)
 
+
 def adjust_learning_rate(optimizer, epoch):
     lr = args.lr * (0.1 ** (epoch // 5))
 
     for param_group in optimizer.param_groups:
+        if 'name' in param_group and param_group['name'] == 'noise_sigma':
+            continue
         param_group['lr'] = lr
 
 

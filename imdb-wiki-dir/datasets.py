@@ -81,3 +81,22 @@ class IMDBWIKI(data.Dataset):
         scaling = len(weights) / np.sum(weights)
         weights = [scaling * x for x in weights]
         return weights
+
+    def get_bucket_info(self, max_target=121, lds=False, lds_kernel='gaussian', lds_ks=5, lds_sigma=2):
+        value_dict = {x: 0 for x in range(max_target)}
+        labels = self.df['age'].values
+        for label in labels:
+            if int(label) < max_target:
+                value_dict[int(label)] += 1
+        bucket_centers = np.asarray([k for k, _ in value_dict.items()])
+        bucket_weights = np.asarray([v for _, v in value_dict.items()])
+        if lds:
+            lds_kernel_window = get_lds_kernel_window(lds_kernel, lds_ks, lds_sigma)
+            print(f'Using LDS: [{lds_kernel.upper()}] ({lds_ks}/{lds_sigma})')
+            bucket_weights = convolve1d(bucket_weights, weights=lds_kernel_window, mode='constant')
+
+        bucket_centers = np.asarray([bucket_centers[k] for k, v in enumerate(bucket_weights) if v > 0])
+        bucket_weights = np.asarray([bucket_weights[k] for k, v in enumerate(bucket_weights) if v > 0])
+        bucket_weights = bucket_weights / bucket_weights.sum()
+        return bucket_centers, bucket_weights
+

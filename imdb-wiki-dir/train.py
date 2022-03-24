@@ -15,10 +15,11 @@ from resnet import resnet50
 from loss import *
 from datasets import IMDBWIKI
 from utils import *
+from balanaced_mse import *
 
 import os
-os.environ["KMP_WARNINGS"] = "FALSE"
 
+os.environ["KMP_WARNINGS"] = "FALSE"
 
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 # imbalanced related
@@ -41,10 +42,21 @@ parser.add_argument('--bucket_start', type=int, default=0, choices=[0, 3],
                     help='minimum(starting) bucket for FDS, 0 for IMDBWIKI, 3 for AgeDB')
 parser.add_argument('--fds_mmt', type=float, default=0.9, help='FDS momentum')
 
+# BMSE
+parser.add_argument('--bmse', action='store_true', default=False, help='use Balanced MSE')
+parser.add_argument('--imp', type=str, default='gai', choices=['gai', 'bmc', 'bni'], help='implementation options')
+parser.add_argument('--gmm', type=str, default='gmm.pkl', help='path to preprocessed GMM')
+parser.add_argument('--init_noise_sigma', type=float, default=1., help='initial scale of the noise')
+parser.add_argument('--sigma_lr', type=float, default=1e-2, help='learning rate of the noise scale')
+parser.add_argument('--balanced_metric', action='store_true', default=False, help='use balanced metric')
+parser.add_argument('--fix_noise_sigma', action='store_true', default=False, help='disable joint optimization')
+
 # re-weighting: SQRT_INV / INV
-parser.add_argument('--reweight', type=str, default='none', choices=['none', 'sqrt_inv', 'inverse'], help='cost-sensitive reweighting scheme')
+parser.add_argument('--reweight', type=str, default='none', choices=['none', 'sqrt_inv', 'inverse'],
+                    help='cost-sensitive reweighting scheme')
 # two-stage training: RRT
-parser.add_argument('--retrain_fc', action='store_true', default=False, help='whether to retrain last regression layer (regressor)')
+parser.add_argument('--retrain_fc', action='store_true', default=False,
+                    help='whether to retrain last regression layer (regressor)')
 
 # training/optimization related
 parser.add_argument('--dataset', type=str, default='imdb_wiki', choices=['imdb_wiki', 'agedb'], help='dataset name')
@@ -54,7 +66,8 @@ parser.add_argument('--store_root', type=str, default='checkpoint', help='root p
 parser.add_argument('--store_name', type=str, default='', help='experiment store name')
 parser.add_argument('--gpu', type=int, default=None)
 parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd'], help='optimizer type')
-parser.add_argument('--loss', type=str, default='l1', choices=['mse', 'l1', 'focal_l1', 'focal_mse', 'huber'], help='training loss type')
+parser.add_argument('--loss', type=str, default='l1', choices=['mse', 'l1', 'focal_l1', 'focal_mse', 'huber'],
+                    help='training loss type')
 parser.add_argument('--lr', type=float, default=1e-3, help='initial learning rate')
 parser.add_argument('--epoch', type=int, default=90, help='number of epochs to train')
 parser.add_argument('--momentum', type=float, default=0.9, help='optimizer momentum')
@@ -74,7 +87,6 @@ args, unknown = parser.parse_known_args()
 
 args.start_epoch, args.best_loss = 0, 1e5
 
-
 if len(args.store_name):
     args.store_name = f'_{args.store_name}'
 if not args.lds and args.reweight != 'none':
@@ -90,6 +102,12 @@ if args.fds:
     args.store_name += f'_{args.start_update}_{args.start_smooth}_{args.fds_mmt}'
 if args.retrain_fc:
     args.store_name += f'_retrain_fc'
+if args.bmse:
+    args.store_name += f'_{args.imp}_{args.init_noise_sigma}_{args.sigma_lr}'
+    if args.imp == 'gai':
+        args.store_name += f'_{args.gmm[:-4]}'
+if args.balanced_metric:
+    args.store_name += f'_balanced_metric'
 args.store_name = f"{args.dataset}_{args.model}{args.store_name}_{args.optimizer}_{args.loss}_{args.lr}_{args.batch_size}"
 
 prepare_folders(args)
@@ -121,7 +139,8 @@ def main():
     train_labels = df_train['age']
 
     train_dataset = IMDBWIKI(data_dir=args.data_dir, df=df_train, img_size=args.img_size, split='train',
-                             reweight=args.reweight, lds=args.lds, lds_kernel=args.lds_kernel, lds_ks=args.lds_ks, lds_sigma=args.lds_sigma)
+                             reweight=args.reweight, lds=args.lds, lds_kernel=args.lds_kernel, lds_ks=args.lds_ks,
+                             lds_sigma=args.lds_sigma)
     val_dataset = IMDBWIKI(data_dir=args.data_dir, df=df_val, img_size=args.img_size, split='val')
     test_dataset = IMDBWIKI(data_dir=args.data_dir, df=df_test, img_size=args.img_size, split='test')
 
@@ -152,7 +171,7 @@ def main():
         return
 
     if args.retrain_fc:
-        assert args.reweight != 'none' and args.pretrained
+        assert args.reweight != 'none' and args.pretrained or args.bmse
         print('===> Retrain last regression layer only!')
         for name, param in model.named_parameters():
             if 'fc' not in name and 'linear' not in name:
@@ -165,7 +184,8 @@ def main():
     else:
         # optimize only the last linear layer
         parameters = list(filter(lambda p: p.requires_grad, model.parameters()))
-        names = list(filter(lambda k: k is not None, [k if v.requires_grad else None for k, v in model.module.named_parameters()]))
+        names = list(filter(lambda k: k is not None,
+                            [k if v.requires_grad else None for k, v in model.module.named_parameters()]))
         assert 1 <= len(parameters) <= 2  # fc.weight, fc.bias
         print(f'===> Only optimize parameters: {names}')
         optimizer = torch.optim.Adam(parameters, lr=args.lr) if args.optimizer == 'adam' else \
@@ -197,12 +217,31 @@ def main():
 
     cudnn.benchmark = True
 
+    if args.bmse:
+        if args.imp == 'gai':
+            criterion = GAILoss(args.init_noise_sigma, args.gmm)
+        elif args.imp == 'bmc':
+            criterion = BMCLoss(args.init_noise_sigma)
+        elif args.imp == 'bni':
+            bucket_centers, bucket_weights = train_dataset.get_bucket_info(
+                max_target=200, lds=args.lds, lds_kernel=args.lds_kernel, lds_ks=args.lds_ks, lds_sigma=args.lds_sigma)
+            criterion = BNILoss(args.init_noise_sigma, bucket_centers, bucket_weights)
+        else:
+            raise NotImplementedError
+        if not args.fix_noise_sigma:
+            optimizer.add_param_group({'params': criterion.noise_sigma, 'lr': args.sigma_lr, 'name': 'noise_sigma'})
+    else:
+        criterion = globals()[f"weighted_{args.loss}_loss"]
+
     for epoch in range(args.start_epoch, args.epoch):
         adjust_learning_rate(optimizer, epoch, args)
-        train_loss = train(train_loader, model, optimizer, epoch)
-        val_loss_mse, val_loss_l1, val_loss_gmean = validate(val_loader, model, train_labels=train_labels)
+        train_loss = train(train_loader, model, optimizer, epoch, criterion)
+        val_loss_mse, val_loss_l1, val_loss_gmean, mean_MSE, mean_L1 = validate(val_loader, model,
+                                                                                train_labels=train_labels)
 
         loss_metric = val_loss_mse if args.loss == 'mse' else val_loss_l1
+        if args.balanced_metric:
+            loss_metric = mean_MSE if args.loss == 'mse' else mean_L1
         is_best = loss_metric < args.best_loss
         args.best_loss = min(loss_metric, args.best_loss)
         print(f"Best {'L1' if 'l1' in args.loss else 'MSE'} Loss: {args.best_loss:.3f}")
@@ -227,19 +266,33 @@ def main():
     checkpoint = torch.load(f"{args.store_root}/{args.store_name}/ckpt.best.pth.tar")
     model.load_state_dict(checkpoint['state_dict'])
     print(f"Loaded best model, epoch {checkpoint['epoch']}, best val loss {checkpoint['best_loss']:.4f}")
-    test_loss_mse, test_loss_l1, test_loss_gmean = validate(test_loader, model, train_labels=train_labels, prefix='Test')
-    print(f"Test loss: MSE [{test_loss_mse:.4f}], L1 [{test_loss_l1:.4f}], G-Mean [{test_loss_gmean:.4f}]\nDone")
+    test_loss_mse, test_loss_l1, test_loss_gmean, mean_MSE, mean_L1 = validate(test_loader, model,
+                                                                               train_labels=train_labels, prefix='Test')
+    print(
+        f"Test loss: bMSE [{mean_MSE:.4f}], bMAE [{mean_L1:.4f}], MSE [{test_loss_mse:.4f}], L1 [{test_loss_l1:.4f}], G-Mean [{test_loss_gmean:.4f}]\nDone")
 
 
-def train(train_loader, model, optimizer, epoch):
+def train(train_loader, model, optimizer, epoch, criterion):
     batch_time = AverageMeter('Time', ':6.2f')
     data_time = AverageMeter('Data', ':6.4f')
-    losses = AverageMeter(f'Loss ({args.loss.upper()})', ':.3f')
+    if args.bmse:
+        losses = AverageMeter(f'Loss ({args.imp.upper()})', ':.3f')
+    else:
+        losses = AverageMeter(f'Loss ({args.loss.upper()})', ':.3f')
     progress = ProgressMeter(
         len(train_loader),
         [batch_time, data_time, losses],
         prefix="Epoch: [{}]".format(epoch)
     )
+
+    if args.bmse:
+        noise_var = AverageMeter('Noise Var', ':.5f')
+        l2 = AverageMeter('L2', ':.5f')
+        progress = ProgressMeter(
+            len(train_loader),
+            [batch_time, data_time, losses, noise_var, l2],
+            prefix="Epoch: [{}]".format(epoch)
+        )
 
     model.train()
     end = time.time()
@@ -251,11 +304,17 @@ def train(train_loader, model, optimizer, epoch):
             outputs, _ = model(inputs, targets, epoch)
         else:
             outputs = model(inputs, targets, epoch)
-
-        loss = globals()[f"weighted_{args.loss}_loss"](outputs, targets, weights)
+        if args.bmse:
+            loss = criterion(outputs, targets)
+        else:
+            loss = criterion(outputs, targets, weights)
         assert not (np.isnan(loss.item()) or loss.item() > 1e6), f"Loss explosion: {loss.item()}"
 
         losses.update(loss.item(), inputs.size(0))
+
+        if args.bmse:
+            noise_var.update(criterion.noise_sigma.item() ** 2)
+            l2.update(F.mse_loss(outputs, targets).item())
 
         optimizer.zero_grad()
         loss.backward()
@@ -322,17 +381,105 @@ def validate(val_loader, model, train_labels=None, prefix='Val'):
             if idx % args.print_freq == 0:
                 progress.display(idx)
 
+        mean_MSE, mean_L1 = balanced_metrics(np.hstack(preds), np.hstack(labels))
         shot_dict = shot_metrics(np.hstack(preds), np.hstack(labels), train_labels)
+        shot_dict_balanced = shot_metrics_balanced(np.hstack(preds), np.hstack(labels), train_labels)
         loss_gmean = gmean(np.hstack(losses_all), axis=None).astype(float)
         print(f" * Overall: MSE {losses_mse.avg:.3f}\tL1 {losses_l1.avg:.3f}\tG-Mean {loss_gmean:.3f}")
+        print('-' * 40)
         print(f" * Many: MSE {shot_dict['many']['mse']:.3f}\t"
               f"L1 {shot_dict['many']['l1']:.3f}\tG-Mean {shot_dict['many']['gmean']:.3f}")
         print(f" * Median: MSE {shot_dict['median']['mse']:.3f}\t"
               f"L1 {shot_dict['median']['l1']:.3f}\tG-Mean {shot_dict['median']['gmean']:.3f}")
         print(f" * Low: MSE {shot_dict['low']['mse']:.3f}\t"
               f"L1 {shot_dict['low']['l1']:.3f}\tG-Mean {shot_dict['low']['gmean']:.3f}")
+        print('=' * 40)
+        print(f" * bMSE {mean_MSE:.3f}\tbMAE {mean_L1:.3f}")
+        print('-' * 40)
+        print(f" * Many: bMSE {shot_dict_balanced['many']['mse']:.3f}\t"
+              f"bMAE {shot_dict_balanced['many']['l1']:.3f}\tG-Mean {shot_dict_balanced['many']['gmean']:.3f}")
+        print(f" * Median: bMSE {shot_dict_balanced['median']['mse']:.3f}\t"
+              f"bMAE {shot_dict_balanced['median']['l1']:.3f}\tG-Mean {shot_dict_balanced['median']['gmean']:.3f}")
+        print(f" * Low: bMSE {shot_dict_balanced['low']['mse']:.3f}\t"
+              f"bMAE {shot_dict_balanced['low']['l1']:.3f}\tG-Mean {shot_dict_balanced['low']['gmean']:.3f}")
+    return losses_mse.avg, losses_l1.avg, loss_gmean, mean_MSE, mean_L1
 
-    return losses_mse.avg, losses_l1.avg, loss_gmean
+
+def balanced_metrics(preds, labels):
+    if isinstance(preds, torch.Tensor):
+        preds = preds.detach().cpu().numpy()
+        labels = labels.detach().cpu().numpy()
+    elif isinstance(preds, np.ndarray):
+        pass
+    else:
+        raise TypeError(f'Type ({type(preds)}) of predictions not supported')
+
+    mse_per_class, l1_per_class = [], []
+    for l in np.unique(labels):
+        mse_per_class.append(np.mean((preds[labels == l] - labels[labels == l]) ** 2))
+        l1_per_class.append(np.mean(np.abs(preds[labels == l] - labels[labels == l])))
+
+    mean_mse = sum(mse_per_class) / len(mse_per_class)
+    mean_l1 = sum(l1_per_class) / len(l1_per_class)
+    return mean_mse, mean_l1
+
+
+def shot_metrics_balanced(preds, labels, train_labels, many_shot_thr=100, low_shot_thr=20):
+    train_labels = np.array(train_labels).astype(int)
+
+    if isinstance(preds, torch.Tensor):
+        preds = preds.detach().cpu().numpy()
+        labels = labels.detach().cpu().numpy()
+    elif isinstance(preds, np.ndarray):
+        pass
+    else:
+        raise TypeError(f'Type ({type(preds)}) of predictions not supported')
+
+    train_class_count, test_class_count = [], []
+    mse_per_class, l1_per_class, l1_all_per_class = [], [], []
+    for l in np.unique(labels):
+        train_class_count.append(len(train_labels[train_labels == l]))
+        test_class_count.append(len(labels[labels == l]))
+        mse_per_class.append(np.mean((preds[labels == l] - labels[labels == l]) ** 2))
+        l1_per_class.append(np.mean(np.abs(preds[labels == l] - labels[labels == l])))
+        l1_all_per_class.append(np.abs(preds[labels == l] - labels[labels == l]))
+
+    many_shot_mse, median_shot_mse, low_shot_mse = [], [], []
+    many_shot_l1, median_shot_l1, low_shot_l1 = [], [], []
+    many_shot_gmean, median_shot_gmean, low_shot_gmean = [], [], []
+    many_shot_cnt, median_shot_cnt, low_shot_cnt = [], [], []
+
+    for i in range(len(train_class_count)):
+        if train_class_count[i] > many_shot_thr:
+            many_shot_mse.append(mse_per_class[i])
+            many_shot_l1.append(l1_per_class[i])
+            many_shot_gmean += list(l1_all_per_class[i])
+            many_shot_cnt.append(test_class_count[i])
+
+
+        elif train_class_count[i] < low_shot_thr:
+            low_shot_mse.append(mse_per_class[i])
+            low_shot_l1.append(l1_per_class[i])
+            low_shot_gmean += list(l1_all_per_class[i])
+            low_shot_cnt.append(test_class_count[i])
+        else:
+            median_shot_mse.append(mse_per_class[i])
+            median_shot_l1.append(l1_per_class[i])
+            median_shot_gmean += list(l1_all_per_class[i])
+            median_shot_cnt.append(test_class_count[i])
+
+    shot_dict = defaultdict(dict)
+    shot_dict['many']['mse'] = np.sum(many_shot_mse) / len(many_shot_mse)
+    shot_dict['many']['l1'] = np.sum(many_shot_l1) / len(many_shot_l1)
+    shot_dict['many']['gmean'] = gmean(np.hstack(many_shot_gmean), axis=None).astype(float)
+    shot_dict['median']['mse'] = np.sum(median_shot_mse) / len(median_shot_mse)
+    shot_dict['median']['l1'] = np.sum(median_shot_l1) / len(median_shot_l1)
+    shot_dict['median']['gmean'] = gmean(np.hstack(median_shot_gmean), axis=None).astype(float)
+    shot_dict['low']['mse'] = np.sum(low_shot_mse) / len(low_shot_mse)
+    shot_dict['low']['l1'] = np.sum(low_shot_l1) / len(low_shot_l1)
+    shot_dict['low']['gmean'] = gmean(np.hstack(low_shot_gmean), axis=None).astype(float)
+
+    return shot_dict
 
 
 def shot_metrics(preds, labels, train_labels, many_shot_thr=100, low_shot_thr=20):

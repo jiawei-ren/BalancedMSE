@@ -168,3 +168,24 @@ def getTestingData(args, batch_size=64):
                                     shuffle=False, num_workers=0, pin_memory=False)
 
     return dataloader_testing
+
+
+def get_bucket_info(args):
+    if args.lds:
+        value_lst = TRAIN_BUCKET_NUM[args.bucket_start:]
+        lds_kernel_window = get_lds_kernel_window(args.lds_kernel, args.lds_ks, args.lds_sigma)
+        logging.info(f'Using LDS: [{args.lds_kernel.upper()}] ({args.lds_ks}/{args.lds_sigma})')
+        if args.reweight == 'sqrt_inv':
+            value_lst = np.sqrt(value_lst)
+        smoothed_value = convolve1d(np.asarray(value_lst), weights=lds_kernel_window, mode='reflect')
+        smoothed_value = [smoothed_value[0]] * args.bucket_start + list(smoothed_value)
+        bucket_weights = np.asarray(smoothed_value)
+    else:
+        value_lst = [TRAIN_BUCKET_NUM[args.bucket_start]] * args.bucket_start + TRAIN_BUCKET_NUM[args.bucket_start:]
+        if args.reweight == 'sqrt_inv':
+            value_lst = np.sqrt(value_lst)
+        bucket_weights = np.asarray(value_lst)
+
+    bucket_centers = np.linspace(0, 10, 101)[:-1] + 0.05
+    bucket_weights = bucket_weights / bucket_weights.sum()
+    return bucket_centers, bucket_weights
