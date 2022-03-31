@@ -53,5 +53,5 @@ We provide below reproduced results on NYUD2-DIR (metric `RMSE`).
 
 | Model | Overall | Many-Shot | Medium-Shot | Few-Shot | Download |
 |:-----:|:-------:|:---------:|:-----------:|:--------:| :------: |
-|  GAI  |  1.279  |   0.819   |    0.917    |  1.705   | [model]() |
-|  BNI  |  1.281  |   0.833   |    0.856    |  1.714   | [model]() |
+|  GAI  |  1.279  |   0.819   |    0.917    |  1.705   | [model](https://drive.google.com/file/d/15VDffeOphB-mBlI7TRP0s-_AP3u1imWk/view?usp=sharing) |
+|  BNI  |  1.281  |   0.833   |    0.856    |  1.714   | [model](https://drive.google.com/file/d/1xRqgEi5rjrX2qqalBVtyFT2abShxgmgU/view?usp=sharing) |

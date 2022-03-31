@@ -30,7 +30,7 @@ Train a vanilla model as the base model:
 ```bash
 python train.py
 ```
-Alternatively, a pretrained base model can be downloaded from [here]().
+Alternatively, a pretrained base model can be downloaded from [here](https://drive.google.com/file/d/1-wHqT7T3-6QDCVQi-2UdqU_R0PkokSvM/view?usp=sharing).
 
 #### Stage 2. Train a model using RRT + Balanced MSE
 
@@ -82,7 +82,7 @@ We provide below reproduced results on IMDB-WIKI-DIR (base method `Vanilla`, met
 
 | Model | Overall | Many-Shot | Medium-Shot | Few-Shot | Download  |
 |:-----:|:-------:|:---------:|:-----------:|:--------:|:---------:|
-|Vanilla| 13.923  |   7.323   |   15.925    |  32.778  | [model]() |
-|  GAI  | 12.690  |   7.589   |   12.880    |  28.307  | [model]() |
-|  BMC  | 12.654  |   7.649   |   12.689    |  28.097  | [model]() |
-|  BNI  | 12.650  |   7.647   |   12.696    |  28.077  | [model]() |
+|Vanilla| 13.923  |   7.323   |   15.925    |  32.778  | [model](https://drive.google.com/file/d/1-wHqT7T3-6QDCVQi-2UdqU_R0PkokSvM/view?usp=sharing) |
+|  GAI  | 12.690  |   7.589   |   12.880    |  28.307  | [model](https://drive.google.com/file/d/1GzA2Hn1BSSZ46Tottd3ro0DcAoUEm4qu/view?usp=sharing) |
+|  BMC  | 12.654  |   7.649   |   12.689    |  28.097  | [model](https://drive.google.com/file/d/1PDinGFE2XZmKKlrld2nzJqYY1_VuFkS6/view?usp=sharing) |
+|  BNI  | 12.650  |   7.647   |   12.696    |  28.077  | [model](https://drive.google.com/file/d/16HcDjP6-EK80QvZMuKI05bbiAlvUwdGE/view?usp=sharing) |
