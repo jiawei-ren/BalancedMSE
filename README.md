@@ -10,6 +10,9 @@ CVPR 2022 (**Oral**)
   <img src="figures/intro.png" width="500px" />
 </div>
 
+## News
+- **[04/27/2022]** We have released the code for the [Synthetic Benchmark](./synthetic_benchmark), including **multi-dimensional Balanced MSE** and visualizations!
+- **[03/31/2022]** Code release, with an [interactive demo](https://huggingface.co/spaces/jiawei011/Demo-Balanced-MSE) and a [hands-on tutorial](https://colab.research.google.com/github/jiawei-ren/BalancedMSE/blob/main/tutorial/balanced_mse.ipynb).
 
 ## Live Demo
 
@@ -34,18 +37,27 @@ The notebook is developed on top of [Deep Imbalanced Regression (DIR) Tutorial](
 we thank the authors for their amazing tutorial!
 
 ## Quick Preview
-A code snippet of the Balanced MSE loss is shown below.
-It is the BMC implementation for one-dimensional imbalanced regression,
-which does not require any label prior beforehand.
+A code snippet of the Balanced MSE loss is shown below. We use the BMC implementation for demonstration,
+BMC does not require any label prior beforehand.
+
+### One-dimensional Balanced MSE
 ```python
 def bmc_loss(pred, target, noise_var):
-    logits = - (pred - target.T).pow(2) / (2 * noise_var)
-    loss = F.cross_entropy(logits, torch.arange(pred.shape[0]))
-    loss = loss * (2 * noise_var).detach()  # optional: restore the loss scale
+    """Compute the Balanced MSE Loss (BMC) between `pred` and the ground truth `targets`.
+    Args:
+      pred: A float tensor of size [batch, 1].
+      target: A float tensor of size [batch, 1].
+      noise_var: A float number or tensor.
+    Returns:
+      loss: A float tensor. Balanced MSE Loss.
+    """
+    logits = - (pred - target.T).pow(2) / (2 * noise_var)   # logit size: [batch, batch]
+    loss = F.cross_entropy(logits, torch.arange(pred.shape[0]))     # contrastive-like loss
+    loss = loss * (2 * noise_var).detach()  # optional: restore the loss scale, 'detach' when noise is learnable 
 
     return loss
 ```
-`noise_var` is a hyper-parameter. `noise_var` can be optionally optimized in training:
+`noise_var` is a one-dimensional hyper-parameter. `noise_var` can be optionally optimized in training:
 ```python
 class BMCLoss(_Loss):
     def __init__(self, init_noise_sigma):
@@ -60,11 +72,34 @@ criterion = BMCLoss(init_noise_sigma)
 optimizer.add_param_group({'params': criterion.noise_sigma, 'lr': sigma_lr, 'name': 'noise_sigma'})
 
 ```
+### Multi-dimensional Balanced MSE
+The multi-dimensional implementation is compatible with the 1-D version.
+```python
+from torch.distributions import MultivariateNormal as MVN
+
+def bmc_loss_md(pred, target, noise_var):
+    """Compute the Multidimensional Balanced MSE Loss (BMC) between `pred` and the ground truth `targets`.
+    Args:
+      pred: A float tensor of size [batch, d].
+      target: A float tensor of size [batch, d].
+      noise_var: A float number or tensor.
+    Returns:
+      loss: A float tensor. Balanced MSE Loss.
+    """
+    I = torch.eye(pred.shape[-1])
+    logits = MVN(pred.unsqueeze(1), noise_var*I).log_prob(target.unsqueeze(0))  # logit size: [batch, batch]
+    loss = F.cross_entropy(logits, torch.arange(pred.shape[0]))     # contrastive-like loss
+    loss = loss * (2 * noise_var).detach()  # optional: restore the loss scale, 'detach' when noise is learnable 
+    
+    return loss
+```
+`noise_var` is still a one-dimensional hyper-parameter and can be optionally learned in training.
 
 ## Run Experiments
 
 Please go into the sub-folder to run experiments.
 
+- [Synthetic Benchmark](./synthetic_benchmark)
 - [IMDB-WIKI-DIR](./imdb-wiki-dir)
 - [NYUD2-DIR](./nyud2-dir)
 - IHMR (coming soon)
