@@ -11,6 +11,7 @@ CVPR 2022 (**Oral**)
 </div>
 
 ## News
+- **[07/28/2022]** We have released the code of IHMR in [MMHuman3d](https://github.com/open-mmlab/mmhuman3d)
 - **[04/27/2022]** We have released the code for the [Synthetic Benchmark](./synthetic_benchmark), including **multi-dimensional Balanced MSE** and visualizations!
 - **[03/31/2022]** Code release, with an [interactive demo](https://huggingface.co/spaces/jiawei011/Demo-Balanced-MSE) and a [hands-on tutorial](https://colab.research.google.com/github/jiawei-ren/BalancedMSE/blob/main/tutorial/balanced_mse.ipynb).
 
