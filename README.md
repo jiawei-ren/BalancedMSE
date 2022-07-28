@@ -102,7 +102,8 @@ Please go into the sub-folder to run experiments.
 - [Synthetic Benchmark](./synthetic_benchmark)
 - [IMDB-WIKI-DIR](./imdb-wiki-dir)
 - [NYUD2-DIR](./nyud2-dir)
-- IHMR (coming soon)
+
+As for IHMR, we have released our code and pretrained models in [MMHuman3d](https://github.com/open-mmlab/mmhuman3d)
 
 ## Citation
 ```bib
